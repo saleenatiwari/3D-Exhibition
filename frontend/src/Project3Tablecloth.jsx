@@ -63,6 +63,7 @@ function TableclothModel({ scrubTime, playing, onDuration, onTimeUpdate }) {
 
     action.loop              = THREE.LoopOnce
     action.clampWhenFinished = true
+    action.timeScale         = 0.4
     action.reset()
     action.play()
     action.paused = true
@@ -88,6 +89,7 @@ function TableclothModel({ scrubTime, playing, onDuration, onTimeUpdate }) {
     if (playing) {
       if (clipDur.current > 0 && action.time >= clipDur.current) {
         action.reset()
+        action.timeScale = 0.4
         action.play()
       }
       action.paused = false
