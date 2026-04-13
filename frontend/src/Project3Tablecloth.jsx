@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { Canvas, useThree } from '@react-three/fiber'
+import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { OrbitControls, useGLTF, useAnimations, Center } from '@react-three/drei'
+import * as THREE from 'three'
 import gsap from 'gsap'
-import tableclothUrl from './assets/TableCloth_final.glb'
+import tableclothUrl from './assets/TableCloth_v4.glb'
 import styles from './Project3Tablecloth.module.css'
 
 // ── Camera entrance ───────────────────────────────────────────────────
@@ -22,69 +23,108 @@ function CameraEntrance() {
 }
 
 // ── The 3D model + animation ──────────────────────────────────────────
-function TableclothModel({ scrubTime, playing, onDuration }) {
+function TableclothModel({ scrubTime, playing, onDuration, onTimeUpdate }) {
   const group = useRef()
   const { scene, animations } = useGLTF(tableclothUrl)
   const { actions, mixer } = useAnimations(animations, group)
 
-  // Names of all clips in the GLB
-  const clipNames = animations.map((a) => a.name)
-  const hasAnim   = clipNames.length > 0
+  const actionRef = useRef(null)
+  const clipDur   = useRef(0)
+  const initialized = useRef(false)
 
-  // Report the real clip duration (in ms) to the parent once on load
+  // Fix materials: DoubleSide on cloth mesh (detected via morph targets)
   useEffect(() => {
-    if (!hasAnim || !onDuration) return
-    const action = actions[clipNames[0]]
-    if (!action) return
-    const durationSec = action.getClip().duration
-    onDuration(durationSec * 1000)
-  }, [hasAnim, actions, clipNames, onDuration])
+    scene.traverse((obj) => {
+      if (!obj.isMesh) return
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material]
+      // Cloth mesh has morph targets — make it double-sided so it's never invisible
+      const isCloth = obj.morphTargetInfluences && obj.morphTargetInfluences.length > 0
+      mats.forEach((mat) => {
+        if (!mat) return
+        if (isCloth) mat.side = THREE.DoubleSide
+        mat.needsUpdate = true
+      })
+      if (obj.morphTargetInfluences) {
+        obj.morphTargetInfluences.fill(0)
+      }
+    })
+  }, [scene])
 
-  // Play / pause the first clip based on the `playing` prop
+  // Init animation — runs once when actions are ready
   useEffect(() => {
-    if (!hasAnim) return
+    if (initialized.current) return
+    const clipNames = Object.keys(actions)
+    if (clipNames.length === 0) return
+    initialized.current = true
+
     const action = actions[clipNames[0]]
+    actionRef.current  = action
+    clipDur.current    = action.getClip().duration
+
+    action.loop              = THREE.LoopOnce
+    action.clampWhenFinished = true
+    action.reset()
+    action.play()
+    action.paused = true
+    action.time   = 0
+    mixer.update(0)
+
+    if (onDuration) onDuration(clipDur.current * 1000)
+  }, [actions, mixer, onDuration])
+
+  // Drive mixer every frame when playing
+  useFrame((_, delta) => {
+    if (!actionRef.current || !clipDur.current) return
+    if (playing) {
+      mixer.update(delta)
+      if (onTimeUpdate) onTimeUpdate(actionRef.current.time / clipDur.current)
+    }
+  })
+
+  // React to play / pause — if at the end, reset and replay from frame 0
+  useEffect(() => {
+    const action = actionRef.current
     if (!action) return
     if (playing) {
+      if (clipDur.current > 0 && action.time >= clipDur.current) {
+        action.reset()
+        action.play()
+      }
       action.paused = false
-      action.play()
     } else {
-      action.play()
       action.paused = true
     }
-  }, [playing, actions, clipNames, hasAnim])
+  }, [playing])
 
-  // Scrub: when not playing, seek to the scrubTime position (0–1)
+  // Scrub when paused
   useEffect(() => {
-    if (playing || !hasAnim) return
-    const action = actions[clipNames[0]]
-    if (!action) return
-    const duration = action.getClip().duration
-    action.time = scrubTime * duration
-    mixer.update(0)   // force pose update at the seeked frame
-  }, [scrubTime, playing, actions, clipNames, hasAnim, mixer])
+    if (playing || !actionRef.current || !clipDur.current) return
+    actionRef.current.time = scrubTime * clipDur.current
+    mixer.update(0)
+  }, [scrubTime, playing, mixer])
 
   return (
     <>
-      {/* Warm ambient base */}
-      <ambientLight intensity={0.28} color="#fff6ee" />
+      {/* Ambient — enough to see all sides without washing out */}
+      <ambientLight intensity={0.45} color="#fff4ee" />
 
-      {/* Key light — front-left, slightly above, warm */}
-      <directionalLight position={[-3, 5, 6]} intensity={1.4} color="#ffe8cc" castShadow
+      {/* Key light — front-left, above, warm */}
+      <directionalLight position={[-3, 6, 5]} intensity={1.5} color="#ffe8cc"
+        castShadow
         shadow-mapSize={[1024, 1024]}
         shadow-camera-near={0.5}
         shadow-camera-far={25}
-        shadow-camera-left={-5}
-        shadow-camera-right={5}
-        shadow-camera-top={5}
-        shadow-camera-bottom={-5}
+        shadow-camera-left={-4}
+        shadow-camera-right={4}
+        shadow-camera-top={4}
+        shadow-camera-bottom={-4}
       />
 
-      {/* Fill — front-right, soft */}
-      <directionalLight position={[4, 2, 5]} intensity={0.5} color="#ddeeff" />
+      {/* Fill — front-right, neutral, lifts shadow side */}
+      <directionalLight position={[4, 3, 4]} intensity={0.55} color="#e8eeff" />
 
-      {/* Rim — behind, separates model from bg */}
-      <directionalLight position={[0, 3, -5]} intensity={0.25} color="#ffd0ff" />
+      {/* Soft under-fill so cloth underside isn't black when draped */}
+      <directionalLight position={[0, -2, 3]} intensity={0.25} color="#fff0e8" />
 
       <group ref={group}>
         <Center>
@@ -95,86 +135,33 @@ function TableclothModel({ scrubTime, playing, onDuration }) {
   )
 }
 
-// ── Root component (owns Canvas + scrubber UI) ────────────────────────
+// ── Root component ────────────────────────────────────────────────────
 export default function Project3Tablecloth() {
   const [playing, setPlaying]     = useState(false)
   const [scrubTime, setScrubTime] = useState(0)
 
-  // Keep scrubTime in sync while playing
-  const rafRef    = useRef(null)
-  const startRef  = useRef(null)  // wall-clock time when play began
-  const startScrub = useRef(0)    // scrubTime value when play began
-  const durationMs = useRef(0)    // total clip duration in ms (filled after load)
-
-  // Try to get the clip duration from the GLB metadata so the timer is accurate
-  useEffect(() => {
-    useGLTF.preload(tableclothUrl)
-  }, [])
-
   const handlePlayPause = () => {
-    if (!playing) {
-      // Start playing from wherever the scrubber is
-      startRef.current   = performance.now()
-      startScrub.current = scrubTime
+    setPlaying((v) => {
+      if (!v && scrubTime >= 1) setScrubTime(0)
+      return !v
+    })
+  }
 
-      const tick = (now) => {
-        if (!durationMs.current) {
-          // Duration not yet known — advance by real time (assume 5s clip initially)
-          const elapsed = (now - startRef.current) / 5000
-          const next = startScrub.current + elapsed
-          if (next >= 1) {
-            setScrubTime(1)
-            setPlaying(false)
-            return
-          }
-          setScrubTime(next)
-          rafRef.current = requestAnimationFrame(tick)
-          return
-        }
-        const elapsed = (now - startRef.current) / durationMs.current
-        const next = startScrub.current + elapsed
-        if (next >= 1) {
-          setScrubTime(1)
-          setPlaying(false)
-          return
-        }
-        setScrubTime(next)
-        rafRef.current = requestAnimationFrame(tick)
-      }
-      rafRef.current = requestAnimationFrame(tick)
-    } else {
-      cancelAnimationFrame(rafRef.current)
-    }
-    setPlaying((v) => !v)
+  const handleReplay = () => {
+    setScrubTime(0)
+    setPlaying(true)
   }
 
   const handleScrub = (e) => {
     const val = Number(e.target.value) / 1000
     setScrubTime(val)
-    if (playing) {
-      // Re-anchor the play timer to the new position
-      startRef.current   = performance.now()
-      startScrub.current = val
-    }
+    if (playing) setPlaying(false)
   }
 
-  const handleReplay = () => {
-    setScrubTime(0)
-    startRef.current   = performance.now()
-    startScrub.current = 0
-    setPlaying(true)
-    cancelAnimationFrame(rafRef.current)
-    const tick = (now) => {
-      const elapsed = (now - startRef.current) / (durationMs.current || 5000)
-      const next = startScrub.current + elapsed
-      if (next >= 1) { setScrubTime(1); setPlaying(false); return }
-      setScrubTime(next)
-      rafRef.current = requestAnimationFrame(tick)
-    }
-    rafRef.current = requestAnimationFrame(tick)
+  const handleTimeUpdate = (t) => {
+    setScrubTime(t)
+    if (t >= 1) setPlaying(false)
   }
-
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
 
   return (
     <div className={styles.root}>
@@ -187,7 +174,8 @@ export default function Project3Tablecloth() {
         <TableclothModel
           scrubTime={scrubTime}
           playing={playing}
-          onDuration={(ms) => { durationMs.current = ms }}
+          onDuration={() => {}}
+          onTimeUpdate={handleTimeUpdate}
         />
         <CameraEntrance />
         <OrbitControls
@@ -200,7 +188,6 @@ export default function Project3Tablecloth() {
         />
       </Canvas>
 
-      {/* ── Timeline bar ─────────────────────────────────────────── */}
       <div className={styles.timeline}>
         <button
           type="button"
@@ -209,18 +196,15 @@ export default function Project3Tablecloth() {
           aria-label={scrubTime >= 1 ? 'Replay' : playing ? 'Pause' : 'Play'}
         >
           {scrubTime >= 1 ? (
-            // Replay icon
             <svg viewBox="0 0 20 20" fill="currentColor">
               <path d="M10 3a7 7 0 1 0 7 7h-2a5 5 0 1 1-1.5-3.5L12 8h4V4l-1.5 1.5A7 7 0 0 0 10 3z"/>
             </svg>
           ) : playing ? (
-            // Pause icon
             <svg viewBox="0 0 20 20" fill="currentColor">
               <rect x="5" y="3" width="4" height="14" rx="1"/>
               <rect x="11" y="3" width="4" height="14" rx="1"/>
             </svg>
           ) : (
-            // Play icon
             <svg viewBox="0 0 20 20" fill="currentColor">
               <polygon points="4,2 18,10 4,18"/>
             </svg>
